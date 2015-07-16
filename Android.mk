@@ -142,13 +142,15 @@ $(RECOVERY_SYMLINKS): $(LOCAL_INSTALLED_MODULE)
 
 ALL_DEFAULT_INSTALLED_MODULES += $(RECOVERY_SYMLINKS)
 
-RECOVERY_SKIP_GPG: $(LOCAL_INSTALLED_MODULE)
 ifeq ($(TARGET_RECOVERY_SKIP_GPG_VERIFICATION), true)
-	@mkdir -p $(TARGET_RECOVERY_ROOT_OUT)/etc/system-image
-	@touch $(TARGET_RECOVERY_ROOT_OUT)/etc/system-image/skip-gpg-verification
-endif
+  RECOVERY_SKIP_GPG := $(TARGET_RECOVERY_ROOT_OUT)/etc/system-image/skip-gpg-verification
 
-ALL_DEFAULT_INSTALLED_MODULES += RECOVERY_SKIP_GPG
+  $(RECOVERY_SKIP_GPG): $(LOCAL_INSTALLED_MODULE)
+	@mkdir -p $(dir $(RECOVERY_SKIP_GPG))
+	@touch $(RECOVERY_SKIP_GPG)
+
+  ALL_DEFAULT_INSTALLED_MODULES += $(RECOVERY_SKIP_GPG)
+endif
 
 # Now let's do recovery symlinks
 BUSYBOX_LINKS := $(shell cat external/busybox/busybox-minimal.links)
