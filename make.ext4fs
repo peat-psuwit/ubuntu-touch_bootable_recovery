@@ -1,0 +1,3 @@
+#!/sbin/sh
+# Small wrapper around mke2fs
+exec /sbin/mke2fs -t ext4 "$@"
