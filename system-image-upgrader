@@ -19,6 +19,10 @@ UPDATE_APPLIED=0
 # System Mountpoint
 SYSTEM_MOUNTPOINT=/cache/system
 
+# How big of a chunk to unpack before reporting checkpoint progress (in bytes)
+PROGRESS_BLOCKSIZE=150000
+UNITS_PER_UPDATE=7 # roughly one a second
+
 echo "Starting image upgrader: $(date)"
 
 # Functions
@@ -43,16 +47,62 @@ check_filesystem() {
     set -e
 }
 
+emit_verify_progress() {
+    # Don't print any of the gpg output, but if we see progress updates,
+    # process them.
+
+    if [ -z "$1" ]; then
+        return 0
+    fi
+
+    set +e # expr can return non-zero
+
+    PREV_PROGRESS=0
+    REMAINDER=0
+
+    # We get one tiny gpg verification first (signature?), just ignore it
+    PAST_FIRST_VERIFY=false
+
+    while read -r line; do
+        if echo $line | grep -q '^\[GNUPG:\] PROGRESS '; then
+            GPG_PROGRESS=$(echo $line | cut -d' ' -f5)
+            GPG_PROGRESS_TOTAL=$(echo $line | cut -d' ' -f6)
+
+            if $PAST_FIRST_VERIFY; then
+                NEW_PROGRESS=$(expr $GPG_PROGRESS - $PREV_PROGRESS)
+                PREV_PROGRESS=$GPG_PROGRESS
+
+                # emit ($REMAINDER + $1 * $NEW_PROGRESS) / $GPG_PROGRESS_TOTAL
+                NUMERATOR=$(expr $REMAINDER + $1 \* $NEW_PROGRESS)
+                REMAINDER=$(expr $NUMERATOR % $GPG_PROGRESS_TOTAL)
+
+                emit_progress "$(expr $NUMERATOR / $GPG_PROGRESS_TOTAL)"
+            elif [ $GPG_PROGRESS -eq $GPG_PROGRESS_TOTAL ]; then
+                PAST_FIRST_VERIFY=true
+            fi
+        fi
+    done
+
+    if [ $REMAINDER -gt 0 ]; then
+        emit_progress 1
+    fi
+
+    set -e
+}
+
 verify_signature() {
     # $1 => validation keyring name
     # $2 => path to validate
+    # $3 => number of progress units for this verification (optional)
 
     if [ -e /etc/system-image/skip-gpg-verification ]; then
-         return 0
+        emit_progress $3
+        return 0
     fi
 
     if [ ! -e $2 ]; then
         echo "File doesn't exist: $2"
+        emit_progress $3
         return 1
     fi
 
@@ -61,6 +111,8 @@ verify_signature() {
         export GNUPGHOME=/tmp/system-image/blacklist/
         if gpg --ignore-time-conflict --verify $2 >/dev/null 2>&1; then
             echo "File signed by a blacklisted key: $2"
+            # Really, we should monitor progress for above, but not super important
+            emit_progress $3
             return 1
         fi
     fi
@@ -69,10 +121,12 @@ verify_signature() {
     export GNUPGHOME=/tmp/system-image/$1/
     if [ ! -e "$GNUPGHOME" ]; then
         echo "Keyring doesn't exist: $1"
+        emit_progress $3
         return 1
     fi
 
-    if gpg --ignore-time-conflict --verify $2 >/dev/null 2>&1; then
+    if gpg --enable-progress-filter --status-fd=1 --ignore-time-conflict --verify $2 2>&1 | \
+            emit_verify_progress $3; then
         return 0
     fi
 
@@ -260,6 +314,83 @@ factory_wipe() {
     esac
 }
 
+progress_units_for_file_untar() {
+    FILE_SIZE=$(stat -t "$1" | cut -d' ' -f2)
+    if [ -z "$FILE_SIZE" ]; then
+        echo 0
+        return
+    fi
+
+    # In the rare case we're evenly divisible, we'll be off by 1... but meh
+    expr $FILE_SIZE / $PROGRESS_BLOCKSIZE + 1
+}
+
+progress_units_for_file_verify() {
+    UNTAR_UNITS=$(progress_units_for_file_untar "$1")
+
+    # Add about 20% of this file's untar time to also verify it's gpg signature.
+    # In testing, large files took an additional 20% of their time to verify,
+    # while small files took as little as 1%.  But I'm preferring large file
+    # time, since 20% of a small file's time isn't much anyway.  And we don't
+    # want to look stuck while verifying a large file, so we give it generous
+    # unit time.
+    VERIFY_UNITS=$(expr $UNTAR_UNITS / 5 + 1)
+
+    # Make it even, since we verify in two steps and it will be easier to
+    # split this way.
+    expr $VERIFY_UNITS + $VERIFY_UNITS % 2
+}
+
+PROGRESS_FILE=$(mktemp /tmp/system-image.XXXXXX)
+emit_progress() {
+    if [ -z "$1" ] || [ "$1" -eq 0 ]; then
+        return 0
+    fi
+
+    COUNT=$(cat "$PROGRESS_FILE")
+    if [ -z "$COUNT" ]; then
+        COUNT=0
+    fi
+
+    COUNT=$(expr $COUNT + $1)
+    echo "progress: $COUNT" 1>&2
+
+    echo "$COUNT" > "$PROGRESS_FILE" # save for future calls
+}
+
+emit_untar_progress() {
+    set +e # expr can return non-zero
+
+    TMPFILE=$(mktemp /tmp/system-image.XXXXXX)
+    REMAINDER=0
+
+    # The goal here is to pass stdin on to stdout in chunks that we report
+    # progress on.  Unfortunately, while dd is a great tool for just passing
+    # along a chunk of data, it doesn't give easy-to-consume feedback about
+    # how much it wrote (a return value would be lovely).  So instead, we write
+    # its feedback it does give us to a file and check that.
+
+    while dd bs=$PROGRESS_BLOCKSIZE count=$UNITS_PER_UPDATE 2>"$TMPFILE"; do
+        WRITTEN=$(tail -n1 "$TMPFILE" | cut -d' ' -f1)
+        if [ -z "$WRITTEN" ] || [ "$WRITTEN" -eq 0 ]; then
+            break
+        fi
+
+        # Since our busybox version of dd does not support iflag=fullblock, we
+        # have to add bytes up ourselves, as dd might have done a short read.
+        NUMERATOR="$(expr $WRITTEN + $REMAINDER)"
+        emit_progress "$(expr $NUMERATOR / $PROGRESS_BLOCKSIZE)"
+        REMAINDER="$(expr $NUMERATOR % $PROGRESS_BLOCKSIZE)"
+    done
+
+    if [ $REMAINDER -gt 0 ]; then
+        emit_progress 1
+    fi
+
+    rm -f "$TMPFILE"
+    set -e
+}
+
 # Initialize GPG
 rm -Rf /tmp/system-image
 mkdir -p /tmp/system-image
@@ -297,6 +428,75 @@ if [ "$USE_SYSTEM_PARTITION" -eq 1 ];then
     # eventually later on so find out which one it is here.
     USERDATA_PARTITION=$(grep "/data" /etc/recovery.fstab |cut -f 1 -d\ )
 fi
+
+# Scan commands to see how many units of progress we'll be emitting during the
+# upgrade.  There are three major sources of delay:
+# - During a delta upgrade, removing files before placing new ones
+# - During a full upgrade, verifying the gpg signature on the huge tarballs
+# - Actually unpacking the tarballs
+#
+# So how to rate them beforehand, so that we have a progress unit total to give
+# to our caller?
+# - A file removal will be our base measurement, at 1 unit of progress. (at
+#   volume, that's about 7.5 units per second on average on my sample krillin)
+# - Verifying a signature takes about 20% of the time to unpack a tarball for a
+#   large tarball (though merely 1% of the time for a small one, but we'll be
+#   generous here since the large tarball verifications overwhelm the small
+#   ones).
+# - And we'll set the rate for unpacking to match the 7.5 units per second
+#   above, to keep the progress bar as smooth as possible.  This means (again,
+#   at volume) about 150000 compressed bytes per unit on my sample krillin.
+#   It's easier to measure compressed bytes, because measuring uncompressed
+#   bytes would involve manually reading the xz metadata (the busybox version
+#   of xz doesn't support --robot --list) to see how big the files will be
+#   ahead of time.
+#
+# Unfortunately, calculating the progress total takes some time up front,
+# during which the progress bar won't move.  But that's not a terrible price
+# to pay and it's small in the grand scheme of things (no more than 10s, while
+# updates take ~5 minutes -- again, on my sample krillin).
+
+PROGRESS_TOTAL=0
+FULL_IMAGE=0
+while read line
+do
+    set -- $line
+    case "$1" in
+        format)
+            echo "Formating: $2"
+            case "$2" in
+                system)
+                    FULL_IMAGE=1
+                ;;
+            esac
+        ;;
+
+        update)
+            # Consider any file removals (1 progress unit per file)
+            REMOVAL_UNITS=0
+            if [ "$FULL_IMAGE" != "1" ]; then
+                cat /cache/recovery/$2 | unxz | tar xf - removed -C /cache >/dev/null 2>&1 || true
+                if [ -e /cache/removed ]; then
+                    REMOVAL_UNITS=$(wc -l /cache/removed | cut -d' ' -f1)
+                fi
+                rm -f /cache/removed
+            fi
+
+            # Consider size of tarball to unpack
+            UNTAR_UNITS=$(progress_units_for_file_untar /cache/recovery/$2)
+
+            # And finally consider the time needed to verify the tarball signature
+            VERIFY_UNITS=$(progress_units_for_file_verify /cache/recovery/$2)
+
+            # Take it all together!
+            PROGRESS_TOTAL=$(expr $PROGRESS_TOTAL + $REMOVAL_UNITS + $UNTAR_UNITS + $VERIFY_UNITS)
+        ;;
+
+        *)
+        ;;
+    esac
+done < $COMMAND_FILE
+echo "progress total: $PROGRESS_TOTAL" 1>&2
 
 # Process the command file
 FULL_IMAGE=0
@@ -520,8 +720,16 @@ do
 
             REMOVE_LIST="$REMOVE_LIST /cache/recovery/$2 /cache/recovery/$3"
 
-            if ! verify_signature device-signing /cache/recovery/$3 && \
-               ! verify_signature image-signing /cache/recovery/$3; then
+            # See how long verifying signatures will take.  But we split units
+            # in two (guaranteed to be even), since we have two verification
+            # steps (and even a failed verification can take some time).
+            VERIFY_UNITS=$(progress_units_for_file_verify /cache/recovery/$2)
+            VERIFY_UNITS=$(expr $VERIFY_UNITS / 2)
+
+            # Verify signatures
+            if verify_signature device-signing /cache/recovery/$3 $VERIFY_UNITS; then
+                emit_progress $VERIFY_UNITS # skip second verify step
+            elif ! verify_signature image-signing /cache/recovery/$3 $VERIFY_UNITS; then
                 echo "Invalid signature"
                 exit 1
             fi
@@ -534,15 +742,22 @@ do
             if [ "$FULL_IMAGE" != "1" ]; then
                 cat recovery/$2 | unxz | tar xf - removed >/dev/null 2>&1 || true
                 if [ -e removed ]; then
+                    RMCOUNT=0
                     while read file; do
                         rm -Rf $file
+                        RMCOUNT=$(expr $RMCOUNT + 1)
+                        if ! expr $RMCOUNT % $UNITS_PER_UPDATE >/dev/null; then
+                            emit_progress $RMCOUNT
+                            RMCOUNT=0
+                        fi
                     done < removed
+                    emit_progress $RMCOUNT
                 fi
                 rm -f removed
             fi
 
             # Unpack everything else on top of the system partition
-            cat recovery/$2 | unxz | tar xf -
+            cat recovery/$2 | emit_untar_progress | unxz | tar xf -
             rm -f removed
 
             # Process partition images

@@ -80,6 +80,8 @@ static const char *COMMAND_FILE = "/cache/recovery/command";
 static const char *INTENT_FILE = "/cache/recovery/intent";
 static const char *LOG_FILE = "/cache/recovery/log";
 static const char *LAST_INSTALL_FILE = "/cache/recovery/last_install";
+static const char *UPDATE_PROGRESS_TOTAL_PREFIX = "progress total: ";
+static const char *UPDATE_PROGRESS_PREFIX = "progress: ";
 static const char *CACHE_ROOT = "/cache";
 static const char *SDCARD_ROOT = "/sdcard";
 static int allow_display_toggle = 0;
@@ -1095,9 +1097,11 @@ main(int argc, char **argv) {
     } else if (update_ubuntu_package != NULL) {
         LOGI("Performing Ubuntu update\n");
         ui_set_background(BACKGROUND_ICON_INSTALLING);
-        ui_show_indeterminate_progress();
         ui_print("Installing Ubuntu update.\n");
 
+        // Go from 50% to 95% (https://wiki.ubuntu.com/SoftwareUpdates#restart-and-install)
+        ui_show_progress(0.5, 0);
+        ui_show_progress(0.45, 0);
 
         if (ensure_path_mounted("/data") != 0) {
             LOGE("Ubuntu update failed\n");
@@ -1105,12 +1109,28 @@ main(int argc, char **argv) {
             pause();
         } else {
             char tmp[PATH_MAX];
-            sprintf(tmp, "%s %s", UBUNTU_UPDATE_SCRIPT, UBUNTU_COMMAND_FILE );
-            if (__system(tmp) != 0) {
+            FILE *output;
+            sprintf(tmp, "%s %s 2>&1", UBUNTU_UPDATE_SCRIPT, UBUNTU_COMMAND_FILE );
+            output = __popen(tmp, "r");
+            if (output == NULL) {
                 LOGE("Ubuntu update failed\n");
                 ui_set_background(BACKGROUND_ICON_ERROR);
                 pause();
             } else {
+                off_t totalSize = 0;
+
+                while (fgets(tmp, PATH_MAX, output) != NULL) {
+                    ui_print("%s", tmp);
+                    if (strncmp(tmp, UPDATE_PROGRESS_TOTAL_PREFIX, strlen(UPDATE_PROGRESS_TOTAL_PREFIX)) == 0) {
+                        totalSize = atoll(tmp + strlen(UPDATE_PROGRESS_TOTAL_PREFIX));
+                    } else if (totalSize > 0 && strncmp(tmp, UPDATE_PROGRESS_PREFIX, strlen(UPDATE_PROGRESS_PREFIX)) == 0) {
+                        off_t progress;
+                        progress = atoll(tmp + strlen(UPDATE_PROGRESS_PREFIX));
+                        ui_set_progress(((float)progress) / totalSize);
+                    }
+                }
+                __pclose(output);
+
                 LOGI("Ubuntu update complete\n");
                 ui_print("Ubuntu update complete.\n");
             }

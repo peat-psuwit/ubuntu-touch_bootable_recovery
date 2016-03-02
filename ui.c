@@ -59,9 +59,9 @@ static int gShowBackButton = 0;
 #define UI_KEY_WAIT_REPEAT 400
 
 UIParameters ui_parameters = {
-    6,       // indeterminate progress bar frames
-    20,      // fps
-    12,      // installation icon frames (0 == static image)
+    5,       // indeterminate progress bar frames
+    1,       // fps
+    0,       // installation icon frames (0 == static image)
     19, 19,  // installation icon overlay offset
 };
 
@@ -79,7 +79,7 @@ static int boardEnableKeyRepeat = 0;
 static int boardRepeatableKeys[64], boardNumRepeatableKeys = 0;
 
 static const struct { gr_surface* surface; const char *name; } BITMAPS[] = {
-    { &gBackgroundIcon[BACKGROUND_ICON_INSTALLING], "icon_installing" },
+    { &gBackgroundIcon[BACKGROUND_ICON_INSTALLING], "icon_ubuntu" },
     { &gBackgroundIcon[BACKGROUND_ICON_ERROR],      "icon_error" },
     { &gBackgroundIcon[BACKGROUND_ICON_UBUNTU],  "icon_ubuntu" },
     { &gBackgroundIcon[BACKGROUND_ICON_CID],  "icon_cid" },
@@ -209,7 +209,7 @@ static void draw_progress_locked()
         int height = gr_get_height(gProgressBarEmpty);
 
         int dx = (gr_fb_width() - width)/2;
-        int dy = (3*gr_fb_height() + iconHeight - 2*height)/4;
+        int dy = (gr_fb_height() + iconHeight)/2;
 
         // Erase behind the progress bar (in case this was a progress-only update)
         gr_color(0, 0, 0, 255);
