@@ -133,6 +133,17 @@ verify_signature() {
     return 1
 }
 
+clean_on_failure() {
+    rm -Rf $1
+    # Remove temporary SWAP
+    if [ -e /cache/recovery/SWAP.img ]; then
+        echo "Cleaning swap"
+        swapoff /cache/recovery/SWAP.img
+        rm -f /cache/recovery/SWAP.img
+    fi
+    return 1
+}
+
 install_keyring() {
     # $1 => full path to tarball
     # $2 => full path to signature
@@ -146,33 +157,29 @@ install_keyring() {
     # Unpacking
     TMPDIR=$(mktemp -d /tmp/system-image/tmp.XXXXX)
     cd $TMPDIR
-    cat $1 | unxz | tar xf -
-    if [ ! -e keyring.json ] || [ ! -e keyring.gpg ]; then
-        rm -Rf $TMPDIR
-        echo "Invalid keyring: $1"
-        return 1
+    cat $1 | unxz | tar xf - keyring.json >/dev/null 2>&1
+    if [ ! -e keyring.json ]; then
+        echo "Missing keyring json description: $1"
+        clean_on_failure $TMPDIR
     fi
 
     # Extract the expiry
     keyring_expiry=$(grep "^    \"expiry\": " keyring.json | cut -d: -f2 | sed -e "s/[ \",]//g")
     if [ -n "$keyring_expiry" ] && [ "$keyring_expiry" -lt "$(date +%s)" ]; then
-        rm -Rf $TMPDIR
         echo "Keyring expired: $1"
-        return 1
+        clean_on_failure $TMPDIR
     fi
 
     # Extract the keyring type
     keyring_type=$(grep "^    \"type\": " keyring.json | cut -d: -f2 | sed -e "s/[, \"]//g")
     if [ -z "$keyring_type" ]; then
-        rm -Rf $TMPDIR
         echo "Missing keyring type: $1"
-        return 1
+        clean_on_failure $TMPDIR
     fi
 
     if [ -e /tmp/system-image/$keyring_type ]; then
-        rm -Rf $TMPDIR
         echo "Keyring already loaded: $1"
-        return 1
+        clean_on_failure $TMPDIR
     fi
 
     signer="unknown"
@@ -195,13 +202,18 @@ install_keyring() {
     esac
 
     if [ -n "$signer" ] && ! verify_signature $signer $2; then
-        rm -Rf $TMPDIR
-        echo "Invalid signature: $1"
-        return 1
+        echo "Invalid key signature: $1"
+        clean_on_failure $TMPDIR
     fi
 
     mkdir /tmp/system-image/$keyring_type
     chmod 700 /tmp/system-image/$keyring_type
+    rm keyring.json
+    cat $1 | unxz | tar xf - keyring.gpg >/dev/null 2>&1
+    if [ ! -e keyring.gpg ]; then
+        echo "Missing key file: $1"
+        clean_on_failure $TMPDIR
+    fi
     mv $TMPDIR/keyring.gpg /tmp/system-image/$keyring_type/pubring.gpg
     chmod 600 /tmp/system-image/$keyring_type/pubring.gpg
     chown 0:0 /tmp/system-image/$keyring_type/pubring.gpg
