@@ -19,6 +19,9 @@ UPDATE_APPLIED=0
 # System Mountpoint
 SYSTEM_MOUNTPOINT=/cache/system
 
+# phablet user uid
+PHABLET_UID=32011
+
 # How big of a chunk to unpack before reporting checkpoint progress (in bytes)
 PROGRESS_BLOCKSIZE=150000
 UNITS_PER_UPDATE=7 # roughly one a second
@@ -235,27 +238,27 @@ property_write() {
     chmod 600 "$prop_dir/$prop"
 }
 
-adb_onlock() {
+adb_keys() {
     if [ "$DATA_FORMAT" -eq 0 ]; then
         return 1
     fi
 
-    flag="/data/.adb_onlock"
-    # if the param != "true" we just delete the flag
-    case $1 in
-        true)
-            touch "$flag"
-        ;;
-
-        false)
-            rm -f "$flag"
-        ;;
-
-        *)
-            echo "Unkown parameter $1, disabling"
-            rm -f "$flag"
-        ;;
-    esac
+    keys_dir="/data/android-data/misc/adb"
+    keys="adb_keys"
+    # if there is any param, then install that key(s) to adb key file
+    # otherwise clean all existing keys
+    if [ -n "$1" ]; then
+        # do not trust full file path from ubuntu_command
+        if [ -f /cache/recovery/$(basename $1) ]; then
+            mkdir -p "$keys_dir"
+            cp /cache/recovery/$(basename $1) "$keys_dir/$keys"
+            REMOVE_LIST="$REMOVE_LIST /cache/recovery/$(basename $1)"
+            # set owner to phablet
+            chown $PHABLET_UID:$PHABLET_UID -R "$keys_dir"
+        fi
+    else
+        rm -f "$keys_dir/$keys"
+    fi
 }
 
 set_password() {
@@ -627,8 +630,8 @@ do
                     set_password $3
                 ;;
 
-                adb_onlock)
-                    adb_onlock true
+                adb_keys)
+                    adb_keys $3
                 ;;
 
                 factory_wipe)
@@ -656,8 +659,8 @@ do
                     unset_password
                 ;;
 
-                adb_onlock)
-                    adb_onlock false
+                adb_keys)
+                    adb_keys
                 ;;
 
                 factory_wipe)
