@@ -543,6 +543,10 @@ do
                     echo "Formatting user data partition .."
 
                     echo "Backup certain files which are marked as persistent:"
+                    # Depending on the system /data might be mounted or not
+                    if ! mountpoint -q /data; then
+                        mount /data
+                    fi
                     # Backup all whitelisted files here so we can restore them later
                     while read file ; do
                         # Skip any comments or empty lines
